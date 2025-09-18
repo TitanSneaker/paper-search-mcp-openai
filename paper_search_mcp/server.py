@@ -188,14 +188,11 @@ def _format_search_result(source: str, paper: Dict[str, Any]) -> Dict[str, Any]:
     document_id = _build_document_id(source, paper)
     metadata = _prepare_metadata(source, paper)
     _update_cache(document_id, metadata)
-    snippet = (metadata["abstract"] or "")[:300]
-    url = metadata["url"] or metadata["pdf_url"] or ""
+    url = metadata.get("url") or metadata.get("pdf_url") or ""
     return {
         "id": document_id,
         "title": metadata["title"],
         "url": url,
-        "snippet": snippet,
-        "source": source,
     }
 
 
