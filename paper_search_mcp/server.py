@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+
 from .academic_platforms.arxiv import ArxivSearcher
 from .academic_platforms.pubmed import PubMedSearcher
 from .academic_platforms.biorxiv import BioRxivSearcher
@@ -24,10 +25,66 @@ from .academic_platforms.crossref import CrossRefSearcher
 # from .academic_platforms.hub import SciHubSearcher
 from .paper import Paper
 
-# Initialize MCP server
-mcp = FastMCP("paper_search_server")
-
 logger = logging.getLogger(__name__)
+
+
+def _normalize_transport(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    mapping = {
+        "stdio": "stdio",
+        "sse": "sse",
+        "streamable-http": "streamable-http",
+        "streamable_http": "streamable-http",
+        "http": "streamable-http",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    logger.warning("Unknown PAPER_SEARCH_MCP_TRANSPORT '%s', defaulting to stdio", value)
+    return None
+
+
+def _determine_transport() -> str:
+    env_transport = _normalize_transport(os.environ.get("PAPER_SEARCH_MCP_TRANSPORT"))
+    if env_transport:
+        return env_transport
+    if os.environ.get("PORT"):
+        return "streamable-http"
+    return "stdio"
+
+
+SELECTED_TRANSPORT = _determine_transport()
+
+
+def _determine_host(transport: str) -> str:
+    if explicit_host := os.environ.get("PAPER_SEARCH_MCP_HOST"):
+        return explicit_host
+    if explicit_host := os.environ.get("HOST"):
+        return explicit_host
+    if transport == "streamable-http":
+        return "0.0.0.0"
+    return "127.0.0.1"
+
+
+def _determine_port(transport: str) -> int:
+    candidates = [os.environ.get("PAPER_SEARCH_MCP_PORT"), os.environ.get("PORT")]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return int(candidate)
+        except ValueError:
+            logger.warning("Invalid port value '%s', falling back to default", candidate)
+    return 8081 if transport == "streamable-http" else 8000
+
+
+# Initialize MCP server with environment-aware networking defaults
+mcp = FastMCP(
+    "paper_search_server",
+    host=_determine_host(SELECTED_TRANSPORT),
+    port=_determine_port(SELECTED_TRANSPORT),
+)
 
 DOWNLOAD_DIR = os.environ.get("PAPER_SEARCH_DOWNLOAD_DIR", "./downloads")
 DEFAULT_MAX_RESULTS = 15
@@ -654,5 +711,15 @@ async def read_crossref_paper(paper_id: str, save_path: str = "./downloads") -> 
     return crossref_searcher.read_paper(paper_id, save_path)
 
 
+def main() -> None:
+    logger.info(
+        "Starting paper_search_mcp server using %s transport on %s:%s",
+        SELECTED_TRANSPORT,
+        mcp.settings.host,
+        mcp.settings.port,
+    )
+    mcp.run(transport=SELECTED_TRANSPORT)
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    main()
