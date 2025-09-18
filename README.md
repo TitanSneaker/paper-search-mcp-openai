@@ -34,6 +34,7 @@ A Model Context Protocol (MCP) server for searching and downloading academic pap
 ## Features
 
 - **Multi-Source Support**: Search and download papers from arXiv, PubMed, bioRxiv, medRxiv, Google Scholar, IACR ePrint Archive, Semantic Scholar.
+- **Deep Research Ready**: Provides the standardized `search` and `fetch` tools required by OpenAI Deep Research and ChatGPT connectors.
 - **Standardized Output**: Papers are returned in a consistent dictionary format via the `Paper` class.
 - **Asynchronous Tools**: Efficiently handles network requests using `httpx`.
 - **MCP Integration**: Compatible with MCP clients for LLM context enhancement.

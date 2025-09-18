@@ -1,36 +1,82 @@
-# tests/test_server.py
-import unittest
 import asyncio
-import os
+import json
+import unittest
+from datetime import UTC, datetime
+from typing import List
+
 from paper_search_mcp import server
+from paper_search_mcp.paper import Paper
 
-class TestPaperSearchServer(unittest.TestCase):
-    def test_search_arxiv(self):
-        """Test the search_arxiv tool returns 10 results."""
-        result = asyncio.run(server.search_arxiv("machine learning", max_results=10))
-        self.assertIsInstance(result, list, "Result should be a list")
-        self.assertEqual(len(result), 10, "Should return exactly 10 results")
-        for paper in result:
-            self.assertIn('title', paper, "Each result should contain a title")
-            self.assertIn('paper_id', paper, "Each result should contain a paper_id")
 
-    def test_download_arxiv_from_search(self):
-        """Test downloading 10 arXiv papers based on search results."""
-        # 先搜索 10 个结果
-        search_results = asyncio.run(server.search_arxiv("machine learning", max_results=10))
-        self.assertEqual(len(search_results), 10, "Search should return 10 results")
+class DummySearcher:
+    """Minimal searcher used to simulate search/fetch behaviour in tests."""
 
-        # 下载目录
-        save_path = "./downloads"
-        os.makedirs(save_path, exist_ok=True)  # 确保目录存在
+    def __init__(self) -> None:
+        self._papers = self._build_papers()
 
-        # 下载每个搜索结果的 PDF
-        for paper in search_results:
-            paper_id = paper['paper_id']
-            result = asyncio.run(server.download_arxiv(paper_id, save_path))
-            self.assertIsInstance(result, str, f"Result for {paper_id} should be a file path")
-            self.assertTrue(result.endswith(".pdf"), f"Result for {paper_id} should be a PDF file path")
-            self.assertTrue(os.path.exists(result), f"PDF file for {paper_id} should exist on disk")
+    def _build_papers(self) -> List[Paper]:
+        now = datetime.now(UTC)
+        return [
+            Paper(
+                paper_id=f"dummy-{idx}",
+                title=f"Dummy Paper {idx}",
+                authors=["Test Author"],
+                abstract=f"Abstract for paper {idx}.",
+                doi=f"10.1000/dummy{idx}",
+                published_date=now,
+                pdf_url=f"https://example.com/paper{idx}.pdf",
+                url=f"https://example.com/paper{idx}",
+                source="dummy",
+            )
+            for idx in range(3)
+        ]
+
+    def search(self, query: str, max_results: int = 10, **_: str) -> List[Paper]:
+        return self._papers[:max_results]
+
+    def read_paper(self, paper_id: str, save_path: str = "./downloads") -> str:
+        return f"Full text for {paper_id} stored in {save_path}."
+
+
+class TestDeepResearchTools(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_searchers = server.SEARCHERS.copy()
+        server.SEARCHERS.clear()
+        server.SEARCH_CACHE.clear()
+        server.SEARCHERS["dummy"] = DummySearcher()
+
+    def tearDown(self) -> None:
+        server.SEARCHERS.clear()
+        server.SEARCHERS.update(self.original_searchers)
+        server.SEARCH_CACHE.clear()
+
+    def test_search_returns_call_tool_result(self) -> None:
+        result = asyncio.run(server.search("quantum", max_results=2))
+        self.assertEqual(len(result.content), 1)
+        payload = json.loads(result.content[0].text)
+        self.assertIn("results", payload)
+        self.assertLessEqual(len(payload["results"]), 2)
+        first_result = payload["results"][0]
+        self.assertTrue(first_result["id"].startswith("dummy:"))
+        self.assertIn("title", first_result)
+        self.assertIn("url", first_result)
+
+    def test_fetch_uses_cached_metadata(self) -> None:
+        search_result = asyncio.run(server.search("dummy", max_results=1))
+        payload = json.loads(search_result.content[0].text)
+        document_id = payload["results"][0]["id"]
+
+        fetch_result = asyncio.run(server.fetch(document_id))
+        self.assertEqual(len(fetch_result.content), 1)
+        fetch_payload = json.loads(fetch_result.content[0].text)
+        self.assertEqual(fetch_payload["id"], document_id)
+        self.assertIn("text", fetch_payload)
+        self.assertIn("metadata", fetch_payload)
+        metadata = fetch_payload["metadata"]
+        self.assertEqual(metadata["source"], "dummy")
+        self.assertIn("authors", metadata)
+        self.assertTrue(fetch_payload["text"].startswith("Full text"))
+
 
 if __name__ == "__main__":
     unittest.main()

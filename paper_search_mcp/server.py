@@ -1,7 +1,17 @@
 # paper_search_mcp/server.py
-from typing import List, Dict, Optional
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional
+
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 from .academic_platforms.arxiv import ArxivSearcher
 from .academic_platforms.pubmed import PubMedSearcher
 from .academic_platforms.biorxiv import BioRxivSearcher
@@ -17,27 +27,241 @@ from .paper import Paper
 # Initialize MCP server
 mcp = FastMCP("paper_search_server")
 
-# Instances of searchers
-arxiv_searcher = ArxivSearcher()
-pubmed_searcher = PubMedSearcher()
-biorxiv_searcher = BioRxivSearcher()
-medrxiv_searcher = MedRxivSearcher()
-google_scholar_searcher = GoogleScholarSearcher()
-iacr_searcher = IACRSearcher()
-semantic_searcher = SemanticSearcher()
-crossref_searcher = CrossRefSearcher()
+logger = logging.getLogger(__name__)
+
+DOWNLOAD_DIR = os.environ.get("PAPER_SEARCH_DOWNLOAD_DIR", "./downloads")
+DEFAULT_MAX_RESULTS = 15
+RESULTS_PER_SOURCE = 5
+MAX_CACHE_SIZE = 128
+
+
+SEARCHERS: Dict[str, Any] = {
+    "arxiv": ArxivSearcher(),
+    "pubmed": PubMedSearcher(),
+    "biorxiv": BioRxivSearcher(),
+    "medrxiv": MedRxivSearcher(),
+    "google_scholar": GoogleScholarSearcher(),
+    "iacr": IACRSearcher(),
+    "semantic": SemanticSearcher(),
+    "crossref": CrossRefSearcher(),
+}
+
+# Instances of searchers (retained for legacy tools)
+arxiv_searcher = SEARCHERS["arxiv"]
+pubmed_searcher = SEARCHERS["pubmed"]
+biorxiv_searcher = SEARCHERS["biorxiv"]
+medrxiv_searcher = SEARCHERS["medrxiv"]
+google_scholar_searcher = SEARCHERS["google_scholar"]
+iacr_searcher = SEARCHERS["iacr"]
+semantic_searcher = SEARCHERS["semantic"]
+crossref_searcher = SEARCHERS["crossref"]
 # scihub_searcher = SciHubSearcher()
+
+
+# Cached metadata for fetch requests
+SEARCH_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
 
 # Asynchronous helper to adapt synchronous searchers
 async def async_search(searcher, query: str, max_results: int, **kwargs) -> List[Dict]:
-    async with httpx.AsyncClient() as client:
-        # Assuming searchers use requests internally; we'll call synchronously for now
-        if 'year' in kwargs:
-            papers = searcher.search(query, year=kwargs['year'], max_results=max_results)
-        else:
-            papers = searcher.search(query, max_results=max_results)
-        return [paper.to_dict() for paper in papers]
+    if "year" in kwargs:
+        papers = await asyncio.to_thread(
+            searcher.search, query, max_results=max_results, year=kwargs["year"]
+        )
+    else:
+        papers = await asyncio.to_thread(searcher.search, query, max_results=max_results)
+    return [paper.to_dict() for paper in papers]
+
+
+def _split_semicolon_values(value: str | None) -> List[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(";") if item.strip()]
+
+
+def _build_document_id(source: str, paper: Dict[str, Any]) -> str:
+    candidate_keys = [
+        paper.get("paper_id"),
+        paper.get("doi"),
+        paper.get("url"),
+        paper.get("pdf_url"),
+        paper.get("title"),
+    ]
+    for key in candidate_keys:
+        if key:
+            return f"{source}:{key}"
+    digest = hashlib.sha1(json.dumps(paper, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"{source}:{digest[:12]}"
+
+
+def _update_cache(document_id: str, metadata: Dict[str, Any]) -> None:
+    if document_id in SEARCH_CACHE:
+        SEARCH_CACHE.move_to_end(document_id)
+    SEARCH_CACHE[document_id] = metadata
+    while len(SEARCH_CACHE) > MAX_CACHE_SIZE:
+        SEARCH_CACHE.popitem(last=False)
+
+
+def _prepare_metadata(source: str, paper: Dict[str, Any]) -> Dict[str, Any]:
+    authors = _split_semicolon_values(paper.get("authors"))
+    categories = _split_semicolon_values(paper.get("categories"))
+    keywords = _split_semicolon_values(paper.get("keywords"))
+    references = _split_semicolon_values(paper.get("references"))
+    metadata = {
+        "source": source,
+        "paper_id": paper.get("paper_id", ""),
+        "title": paper.get("title", "").strip() or "Untitled document",
+        "abstract": paper.get("abstract", ""),
+        "doi": paper.get("doi", ""),
+        "url": paper.get("url", ""),
+        "pdf_url": paper.get("pdf_url", ""),
+        "published_date": paper.get("published_date", ""),
+        "updated_date": paper.get("updated_date", ""),
+        "authors": authors,
+        "categories": categories,
+        "keywords": keywords,
+        "citations": paper.get("citations"),
+        "references": references,
+        "extra": paper.get("extra", ""),
+    }
+    return metadata
+
+
+def _format_search_result(source: str, paper: Dict[str, Any]) -> Dict[str, Any]:
+    document_id = _build_document_id(source, paper)
+    metadata = _prepare_metadata(source, paper)
+    _update_cache(document_id, metadata)
+    snippet = (metadata["abstract"] or "")[:300]
+    url = metadata["url"] or metadata["pdf_url"] or ""
+    return {
+        "id": document_id,
+        "title": metadata["title"],
+        "url": url,
+        "snippet": snippet,
+        "source": source,
+    }
+
+
+async def _search_source(source: str, searcher: Any, query: str, limit: int) -> List[Dict[str, Any]]:
+    try:
+        papers = await async_search(searcher, query, limit)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("Search failed for source %s: %s", source, exc)
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for paper in papers:
+        results.append(_format_search_result(source, paper))
+    return results
+
+
+async def _get_document_text(source: str, paper_id: str) -> str:
+    searcher = SEARCHERS.get(source)
+    if not searcher:
+        return ""
+
+    if not hasattr(searcher, "read_paper"):
+        return ""
+
+    try:
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        return await asyncio.to_thread(searcher.read_paper, paper_id, DOWNLOAD_DIR)
+    except NotImplementedError:
+        return ""
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("Failed to read paper %s from %s: %s", paper_id, source, exc)
+        return ""
+
+
+def _empty_search_response() -> CallToolResult:
+    payload = {"results": []}
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload))])
+
+
+def _build_fetch_response(document_id: str, metadata: Dict[str, Any], text: str) -> CallToolResult:
+    url = metadata.get("url") or metadata.get("pdf_url") or ""
+    payload = {
+        "id": document_id,
+        "title": metadata.get("title", document_id),
+        "text": text,
+        "url": url,
+        "metadata": metadata,
+    }
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload))])
+
+
+@mcp.tool("search")
+async def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> CallToolResult:
+    """Deep Research compatible search tool aggregating across sources."""
+
+    if not query or not query.strip():
+        return _empty_search_response()
+
+    limit = max(1, min(RESULTS_PER_SOURCE, max_results))
+    tasks = [
+        _search_source(source, searcher, query, limit)
+        for source, searcher in SEARCHERS.items()
+    ]
+
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+    aggregated: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in gathered:
+        if isinstance(group, Exception):  # pragma: no cover - defensive logging
+            logger.warning("Unhandled search exception: %s", group)
+            continue
+        for item in group:
+            if item["id"] in seen:
+                continue
+            aggregated.append(item)
+            seen.add(item["id"])
+            if len(aggregated) >= max_results:
+                break
+        if len(aggregated) >= max_results:
+            break
+
+    payload = {"results": aggregated}
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload))])
+
+
+@mcp.tool("fetch")
+async def fetch(document_id: str) -> CallToolResult:
+    """Fetch full document content for a search result."""
+
+    if not document_id:
+        raise ValueError("Document identifier is required")
+
+    metadata = SEARCH_CACHE.get(document_id)
+    if metadata is None:
+        source, _, paper_id = document_id.partition(":")
+        metadata = {
+            "source": source,
+            "paper_id": paper_id,
+            "title": paper_id or document_id,
+            "abstract": "",
+            "doi": "",
+            "url": "",
+            "pdf_url": "",
+            "published_date": "",
+            "updated_date": "",
+            "authors": [],
+            "categories": [],
+            "keywords": [],
+            "citations": None,
+            "references": [],
+            "extra": "",
+        }
+    source = metadata.get("source", "")
+    paper_id = metadata.get("paper_id", "")
+    full_text = ""
+    if source and paper_id:
+        full_text = await _get_document_text(source, paper_id)
+
+    if not full_text:
+        full_text = metadata.get("abstract", "") or "Content unavailable."
+
+    return _build_fetch_response(document_id, metadata, full_text)
 
 
 # Tool definitions
