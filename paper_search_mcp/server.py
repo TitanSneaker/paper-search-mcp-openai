@@ -283,19 +283,24 @@ async def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> CallTool
 
 
 @mcp.tool("fetch")
-async def fetch(document_id: str) -> CallToolResult:
+async def fetch(id: str | None = None, document_id: str | None = None) -> CallToolResult:
     """Fetch full document content for a search result."""
 
-    if not document_id:
+    identifier = document_id or id
+
+    if not identifier:
         raise ValueError("Document identifier is required")
 
-    metadata = SEARCH_CACHE.get(document_id)
+    if document_id and id and document_id != id:
+        raise ValueError("Conflicting identifiers provided")
+
+    metadata = SEARCH_CACHE.get(identifier)
     if metadata is None:
-        source, _, paper_id = document_id.partition(":")
+        source, _, paper_id = identifier.partition(":")
         metadata = {
             "source": source,
             "paper_id": paper_id,
-            "title": paper_id or document_id,
+            "title": paper_id or identifier,
             "abstract": "",
             "doi": "",
             "url": "",
@@ -318,7 +323,7 @@ async def fetch(document_id: str) -> CallToolResult:
     if not full_text:
         full_text = metadata.get("abstract", "") or "Content unavailable."
 
-    return _build_fetch_response(document_id, metadata, full_text)
+    return _build_fetch_response(identifier, metadata, full_text)
 
 
 # Tool definitions
