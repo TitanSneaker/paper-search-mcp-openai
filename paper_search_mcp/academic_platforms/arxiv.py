@@ -22,9 +22,27 @@ class ArxivSearcher(PaperSource):
     """Searcher for arXiv papers"""
     BASE_URL = "http://export.arxiv.org/api/query"
 
-    def search(self, query: str, max_results: int = 10) -> List[Paper]:
+    def search(self, query: str, max_results: int = 10, search_field: str = "all") -> List[Paper]:
+        """
+        Search arXiv papers.
+
+        Args:
+            query: Search query string.
+            max_results: Maximum number of results.
+            search_field: Field to search in ('ti' for title, 'abs' for abstract, 'au' for author, 'all' for all fields).
+
+        Returns:
+            List[Paper]: List of Paper objects.
+        """
+        field_map = {
+            "title": "ti",
+            "abstract": "abs",
+            "author": "au",
+            "all": "all"
+        }
+        field_prefix = field_map.get(search_field.lower(), "all")
         params = {
-            'search_query': f"ti:\"{query}\"",
+            'search_query': f'{field_prefix}:"{query}"',
             'max_results': max_results,
             'sortBy': 'submittedDate',
             'sortOrder': 'descending'
