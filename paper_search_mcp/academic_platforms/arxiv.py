@@ -6,6 +6,19 @@ import feedparser
 from ..paper import Paper
 from PyPDF2 import PdfReader
 import os
+import re
+
+SPECIAL_CHARS = r'[\+\-\&\|\!\(\)\{\}\[\]\^"~\*\?:\/\\\.]'
+
+
+def format_query(query: str) -> str:
+    # 如果包含特殊字符，则整体加上双引号
+    if re.search(SPECIAL_CHARS, query):
+        # 避免重复包裹
+        if not (query.startswith('"') and query.endswith('"')):
+            query = f'"{query}"'
+    return query
+
 
 class PaperSource:
     """Abstract base class for paper sources"""
@@ -41,8 +54,9 @@ class ArxivSearcher(PaperSource):
             "all": "all"
         }
         field_prefix = field_map.get(search_field.lower(), "all")
+        query=format_query(query)
         params = {
-            'search_query': f'{field_prefix}:"{query}"',
+            'search_query': f"{field_prefix}:{query}",
             'max_results': max_results,
             'sortBy': 'submittedDate',
             'sortOrder': 'descending'
