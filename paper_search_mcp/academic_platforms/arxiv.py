@@ -24,7 +24,7 @@ class ArxivSearcher(PaperSource):
 
     def search(self, query: str, max_results: int = 10) -> List[Paper]:
         params = {
-            'search_query': query,
+            'search_query': f"ti:\"{query}\"",
             'max_results': max_results,
             'sortBy': 'submittedDate',
             'sortOrder': 'descending'
