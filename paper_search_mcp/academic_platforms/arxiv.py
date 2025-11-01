@@ -62,6 +62,11 @@ class ArxivSearcher(PaperSource):
             'sortOrder': 'descending'
         }
         response = requests.get(self.BASE_URL, params=params)
+        if not (hasattr(feed, 'entries') and len(feed.entries) != 0):
+            query = query.replace('"', '')  # 移除双引号
+            params['search_query'] = f"{field_prefix}:{query}"
+            response = requests.get(self.BASE_URL, params=params)
+        
         feed = feedparser.parse(response.content)
         papers = []
         for entry in feed.entries:
