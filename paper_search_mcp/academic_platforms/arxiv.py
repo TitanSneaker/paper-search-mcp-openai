@@ -26,8 +26,8 @@ class ArxivSearcher(PaperSource):
         params = {
             'search_query': query,
             'max_results': max_results,
-            'sortBy': 'submittedDate',
-            'sortOrder': 'descending'
+            # 'sortBy': 'submittedDate',
+            # 'sortOrder': 'descending'
         }
         response = requests.get(self.BASE_URL, params=params)
         feed = feedparser.parse(response.content)
